@@ -1,8 +1,4 @@
-// Local Gradle builds for Android, per profile.
-// Usage: bun run build:android:<development|preview|release> [--clean]
-//   development → debug APK (loads JS from Metro: run `bun run start`)
-//   preview     → release APK (JS bundled, installable/sideloadable)
-//   release     → release AAB (for Google Play upload)
+// Local Gradle builds for Android, per profile. Run with --help for usage.
 // Outputs are copied to build/ so `bun run serve:apk` can serve them.
 const { spawnSync } = require('node:child_process');
 const { copyFileSync, existsSync, mkdirSync } = require('node:fs');
@@ -32,13 +28,99 @@ const PROFILES = {
   },
 };
 
-const [profileName, ...flags] = process.argv.slice(2);
-const profile = PROFILES[profileName];
-if (!profile) {
-  console.error(`Unknown profile "${profileName}". Use: ${Object.keys(PROFILES).join(', ')}`);
+const ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'];
+const ABI_ALIASES = {
+  arm64: 'arm64-v8a',
+  aarch64: 'arm64-v8a',
+  'arm64-v8a': 'arm64-v8a',
+  arm: 'armeabi-v7a',
+  arm32: 'armeabi-v7a',
+  armv7: 'armeabi-v7a',
+  'armeabi-v7a': 'armeabi-v7a',
+  x64: 'x86_64',
+  'x86-64': 'x86_64',
+  x86_64: 'x86_64',
+  x86: 'x86',
+};
+
+const HELP = `Build the Android app locally with Gradle.
+
+Usage:
+  bun run build:android:<profile> [--arch <cpu,...>] [--clean]
+
+Profiles:
+  development   Debug APK; loads JS from Metro (run \`bun run start\` first)
+  preview       Release APK; JS bundled, installable by sideloading
+  release       Release AAB for Google Play upload
+
+Options:
+  --arch, -a <cpu,...>  CPU types (ABIs) to compile native code for. Default: all
+                        arm64      arm64-v8a    real phones/tablets (most devices)
+                        arm        armeabi-v7a  old/cheap 32-bit phones
+                        x64        x86_64       emulators on Windows/Intel PCs
+                        x86        x86          old 32-bit emulators
+                        all        all of the above
+  --clean               Regenerate android/ (expo prebuild --clean) before building
+  --help, -h            Show this help
+
+Examples:
+  bun run build:android:development --arch arm64        fast build for your phone
+  bun run build:android:development --arch x64          Android emulator on a PC
+  bun run build:android:preview --arch arm64,x64        phone + emulator
+  bun run build:android:release                         all CPUs (recommended for Play)
+
+Tips:
+  - Check your phone's CPU: adb shell getprop ro.product.cpu.abi
+  - Fewer CPU types = much faster native (C++) builds and smaller APKs.
+  - Google Play delivers only the matching CPU from an AAB, so keep all for release.`;
+
+function fail(msg) {
+  console.error(`✖ ${msg}\n`);
+  console.error('Run with --help for usage.');
   process.exit(1);
 }
-const clean = flags.includes('--clean');
+
+function parseAbis(value) {
+  if (!value) fail('--arch needs a value, e.g. --arch arm64 or --arch arm64,x64');
+  const parts = value.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+  if (parts.includes('all')) return [...ABIS];
+  const abis = parts.map((v) => {
+    const abi = ABI_ALIASES[v];
+    if (!abi) {
+      const hint = Object.keys(ABI_ALIASES).find((k) => k.startsWith(v.slice(0, 3)));
+      fail(`Unknown CPU type "${v}".${hint ? ` Did you mean "${hint}"?` : ''} Use: arm64, arm, x64, x86, all`);
+    }
+    return abi;
+  });
+  return [...new Set(abis)];
+}
+
+const args = process.argv.slice(2).filter((a) => a !== '--');
+if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+  console.log(HELP);
+  process.exit(0);
+}
+
+const [profileName, ...flags] = args;
+const profile = PROFILES[profileName];
+if (!profile) {
+  const hint = Object.keys(PROFILES).find((p) => p.startsWith(String(profileName).slice(0, 3)));
+  fail(`Unknown profile "${profileName}".${hint ? ` Did you mean "${hint}"?` : ''} Use: ${Object.keys(PROFILES).join(', ')}`);
+}
+
+let clean = false;
+let abis = [...ABIS];
+for (let i = 0; i < flags.length; i++) {
+  const f = flags[i];
+  if (f === '--clean') clean = true;
+  else if (f === '--arch' || f === '-a') abis = parseAbis(flags[++i]);
+  else if (f.startsWith('--arch=')) abis = parseAbis(f.slice('--arch='.length));
+  else fail(`Unknown option "${f}".`);
+}
+const allAbis = abis.length === ABIS.length;
+
+// With shell: true (Windows) values with spaces or commas must be quoted.
+const q = (v) => (IS_WIN ? `"${v}"` : v);
 
 function run(cmd, args, cwd, env = {}) {
   console.log(`\n$ ${cmd} ${args.join(' ')}`);
@@ -73,10 +155,10 @@ if (!hasJavaHome) {
       '  macOS:   export JAVA_HOME=$(/usr/libexec/java_home -v 17)',
   );
 }
-// With shell: true (Windows) a path containing spaces must be quoted.
-const q = (v) => (IS_WIN ? `"${v}"` : v);
+console.log(`CPU types: ${abis.join(', ')}${allAbis ? ' (all — pass --arch arm64 for a faster local build)' : ''}`);
 const gradleArgs = [
   profile.task,
+  q(`-PreactNativeArchitectures=${abis.join(',')}`),
   ...(hasJavaHome ? [`-Porg.gradle.java.installations.paths=${q(javaHome)}`] : []),
   '-Porg.gradle.java.installations.auto-download=false',
 ];
@@ -90,7 +172,12 @@ if (!existsSync(src)) {
   process.exit(1);
 }
 mkdirSync(OUT_DIR, { recursive: true });
-const dest = join(OUT_DIR, profile.file);
+// Suffix the file with the CPU types when not building all of them.
+const fileName = allAbis ? profile.file : profile.file.replace(/(\.\w+)$/, `-${abis.join('+')}$1`);
+const dest = join(OUT_DIR, fileName);
 copyFileSync(src, dest);
 console.log(`\n✔ ${profileName} build: ${dest}`);
 if (profileName === 'development') console.log('  Start Metro with `bun run start` before opening the app.');
+if (profileName === 'release' && !allAbis) {
+  console.log('  ⚠ Release AAB built for some CPU types only; devices with other CPUs cannot install it from Play.');
+}

@@ -1,0 +1,13 @@
+This is the same build, still running in D:\ANDROID\PushNotifCaptureApp, with the same old CMake cache (.cxx\Debug\5z3a4z5c). Nothing has changed yet, so the error won't go away until you do one of these two fixes.
+
+Fix A: build from a short folder (no admin, works right away)
+
+robocopy D:\ANDROID\PushNotifCaptureApp D:\pnc /E /XD node_modules android .cxx build .git
+cd /d D:\pnc
+bun install
+bun run prebuild:android:clean
+cd android
+gradlew.bat assembleDebug -PreactNativeArchitectures=arm64-v8a
+Then check that the error now shows D:\pnc\.... If it still shows D:\ANDROID\..., you're running Gradle in the old folder.
+
+If you want to keep git, drop .git from the /XD list, or git clone the repo into D:\pnc instead of copying.
