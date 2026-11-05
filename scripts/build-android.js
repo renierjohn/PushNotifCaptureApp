@@ -6,7 +6,7 @@
 // Outputs are copied to build/ so `bun run serve:apk` can serve them.
 const { spawnSync } = require('node:child_process');
 const { copyFileSync, existsSync, mkdirSync } = require('node:fs');
-const { join, resolve } = require('node:path');
+const { basename, dirname, join, resolve } = require('node:path');
 
 const ROOT = resolve(__dirname, '..');
 const ANDROID = join(ROOT, 'android');
@@ -61,8 +61,36 @@ if (clean || !existsSync(ANDROID)) {
 }
 
 // 2. Gradle build.
-const env = profileName === 'development' ? {} : { NODE_ENV: 'production' };
-run(GRADLEW, [profile.task], ANDROID, env);
+// The Android Gradle plugin requests a JDK 17 toolchain. Without a toolchain download
+// repository (foojay) Gradle can't auto-provision one, so point it at the local JDK
+// from JAVA_HOME and disable auto-download to get a clear error instead.
+// Accept JAVA_BIN (path to <jdk>/bin or <jdk>/bin/java[.exe]) as a fallback for JAVA_HOME.
+function homeFromJavaBin(bin) {
+  if (!bin) return undefined;
+  const dir = /^java(\.exe)?$/i.test(basename(bin)) ? dirname(bin) : bin;
+  return basename(dir).toLowerCase() === 'bin' ? dirname(dir) : dir;
+}
+const javaHome = process.env.JAVA_HOME || homeFromJavaBin(process.env.JAVA_BIN);
+const hasJavaHome = Boolean(javaHome && existsSync(javaHome));
+if (!hasJavaHome) {
+  console.warn(
+    '⚠ JAVA_HOME/JAVA_BIN is not set or does not exist; Gradle will only use JDKs it can auto-detect. Point JAVA_HOME at any JDK 17.\n' +
+      '  Windows: setx JAVA_HOME "C:\\Program Files\\Eclipse Adoptium\\jdk-17.x.x-hotspot" (then reopen the terminal)\n' +
+      '  macOS:   export JAVA_HOME=$(/usr/libexec/java_home -v 17)',
+  );
+}
+// With shell: true (Windows) a path containing spaces must be quoted.
+const q = (v) => (IS_WIN ? `"${v}"` : v);
+const gradleArgs = [
+  profile.task,
+  ...(hasJavaHome ? [`-Porg.gradle.java.installations.paths=${q(javaHome)}`] : []),
+  '-Porg.gradle.java.installations.auto-download=false',
+];
+const env = {
+  ...(hasJavaHome ? { JAVA_HOME: javaHome } : {}), // gradlew/gradlew.bat read JAVA_HOME only
+  ...(profileName === 'development' ? {} : { NODE_ENV: 'production' }),
+};
+run(GRADLEW, gradleArgs, ANDROID, env);
 
 // 3. Copy output to build/.
 const src = join(ANDROID, profile.output);
