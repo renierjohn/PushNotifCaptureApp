@@ -11,6 +11,8 @@ const { join, resolve } = require('node:path');
 const ROOT = resolve(__dirname, '..');
 const ANDROID = join(ROOT, 'android');
 const OUT_DIR = join(ROOT, 'build');
+const IS_WIN = process.platform === 'win32';
+const GRADLEW = IS_WIN ? 'gradlew.bat' : './gradlew';
 
 const PROFILES = {
   development: {
@@ -40,7 +42,13 @@ const clean = flags.includes('--clean');
 
 function run(cmd, args, cwd, env = {}) {
   console.log(`\n$ ${cmd} ${args.join(' ')}`);
-  const res = spawnSync(cmd, args, { cwd, stdio: 'inherit', env: { ...process.env, ...env } });
+  // Windows: .bat/.cmd shims (gradlew.bat, bunx) can only be spawned through a shell.
+  const res = spawnSync(cmd, args, {
+    cwd,
+    stdio: 'inherit',
+    shell: IS_WIN,
+    env: { ...process.env, ...env },
+  });
   if (res.status !== 0) {
     console.error(`\n✖ ${cmd} failed (exit ${res.status ?? res.error?.message})`);
     process.exit(res.status ?? 1);
@@ -54,7 +62,7 @@ if (clean || !existsSync(ANDROID)) {
 
 // 2. Gradle build.
 const env = profileName === 'development' ? {} : { NODE_ENV: 'production' };
-run('./gradlew', [profile.task], ANDROID, env);
+run(GRADLEW, [profile.task], ANDROID, env);
 
 // 3. Copy output to build/.
 const src = join(ANDROID, profile.output);
